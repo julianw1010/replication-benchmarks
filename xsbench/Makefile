@@ -1,13 +1,13 @@
-# Makefile
 CC = gcc
-CFLAGS = -O3 -fopenmp -march=native -Wall
+CFLAGS = -O3 -march=native -fopenmp -Wall
 LDFLAGS = -fopenmp -lm
 
 TARGET = xsbench
+SRC = xsbench.c
 
 all: $(TARGET)
 
-$(TARGET): xsbench.c
+$(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:

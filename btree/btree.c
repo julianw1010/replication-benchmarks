@@ -11,6 +11,7 @@
 #define ORDER 4
 #define MAX_KEYS (2 * ORDER - 1)
 #define ELEMENT_SIZE 16
+#define TARGET_GB 100ULL
 
 typedef struct {
     uint64_t key;
@@ -34,24 +35,28 @@ static inline uint64_t xorshift64(uint64_t* state) {
 }
 
 int main(int argc, char** argv) {
-    // 100GB / sizeof(BTreeNode) ≈ 125M nodes
     size_t node_size = sizeof(BTreeNode);
-    uint64_t num_nodes = (100ULL * 1024 * 1024 * 1024) / node_size;
-    uint64_t lookups_per_thread = 50000000ULL;
-    
-    if (argc > 1) num_nodes = strtoull(argv[1], NULL, 10);
-    if (argc > 2) lookups_per_thread = strtoull(argv[2], NULL, 10);
+    uint64_t num_nodes = (TARGET_GB * 1024 * 1024 * 1024) / node_size;
+    uint64_t total_elements = num_nodes * MAX_KEYS;
     
     int num_threads = omp_get_max_threads();
+    uint64_t lookups_per_thread = 47000000ULL;
+    
+    if (argc > 1) lookups_per_thread = strtoull(argv[1], NULL, 10);
+    
     double size_gb = (num_nodes * node_size) / (1024.0*1024.0*1024.0);
     
-    printf("Threads: %d, Nodes: %lu, Size: %.1f GB\n", num_threads, num_nodes, size_gb);
+    printf("=== BTree Multi-Socket Benchmark ===\n");
+    printf("Order: %d, Element Size: %d bytes\n", ORDER, ELEMENT_SIZE);
+    printf("Threads: %d, Nodes: %lu (%.1fM elements)\n", 
+           num_threads, num_nodes, total_elements/1e6);
+    printf("Memory: %.1f GB\n", size_gb);
     
     if (numa_available() >= 0) {
         numa_set_interleave_mask(numa_all_nodes_ptr);
     }
     
-    printf("Allocating...\n");
+    printf("\nAllocating...\n");
     double start = omp_get_wtime();
     
     BTreeNode* nodes = malloc(num_nodes * sizeof(BTreeNode));
@@ -60,7 +65,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Initialize in parallel - create tree-like structure
     #pragma omp parallel
     {
         uint64_t seed = omp_get_thread_num() + 1;
@@ -85,9 +89,10 @@ int main(int argc, char** argv) {
     }
     
     double init_time = omp_get_wtime() - start;
-    printf("Init time: %.2f seconds\n", init_time);
+    printf("Init: %.2fs\n", init_time);
     
-    printf("Running lookups (%lu per thread)...\n", lookups_per_thread);
+    printf("\nRunning index lookups (%luM total)...\n", 
+           lookups_per_thread * num_threads / 1000000);
     start = omp_get_wtime();
     
     uint64_t total_sum = 0;
@@ -102,7 +107,6 @@ int main(int argc, char** argv) {
             uint64_t idx = xorshift64(&seed) % num_nodes;
             BTreeNode* node = &nodes[idx];
             
-            // Walk 4 levels deep
             for (int depth = 0; depth < 4 && !node->is_leaf; depth++) {
                 int child_idx = xorshift64(&seed) % (MAX_KEYS + 1);
                 node = node->children[child_idx];
@@ -118,10 +122,10 @@ int main(int argc, char** argv) {
     double lookup_time = omp_get_wtime() - start;
     uint64_t total_lookups = lookups_per_thread * num_threads;
     
-    printf("\nResults:\n");
-    printf("  Lookup time: %.2f seconds\n", lookup_time);
-    printf("  Lookups/sec: %.2fM\n", total_lookups / lookup_time / 1e6);
-    printf("  Checksum: %lu\n", total_sum);
+    printf("\n=== Results ===\n");
+    printf("Lookup time: %.2fs\n", lookup_time);
+    printf("Throughput: %.2fM lookups/sec\n", total_lookups / lookup_time / 1e6);
+    printf("Checksum: %lu\n", total_sum);
     
     free(nodes);
     return 0;
