@@ -1,19 +1,19 @@
 CC = gcc
-CFLAGS = -O3 -march=native -fopenmp -Wall -Wextra
-LDFLAGS = -fopenmp -lm
+CFLAGS = -O3 -march=native -fopenmp -Wall
+LDFLAGS = -lm -fopenmp
 
-TARGET = canneal_bench
-SRC = canneal_bench.c
-
-.PHONY: all clean run
+TARGET = canneal
+SRC = canneal.c
 
 all: $(TARGET)
 
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
+clean:
+	rm -f $(TARGET)
+
 run: $(TARGET)
 	./$(TARGET)
 
-clean:
-	rm -f $(TARGET)
+.PHONY: all clean run

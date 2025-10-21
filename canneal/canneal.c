@@ -6,6 +6,7 @@
 #include <omp.h>
 #include <time.h>
 #include <stdint.h>
+#include <unistd.h>
 
 #define MAX_DEGREE 16
 #define SWAP_ATTEMPTS_PER_TEMP 100000000
@@ -13,7 +14,7 @@
 typedef struct {
     int x, y;
     int netlist_id;
-    uint64_t pad[5];
+    uint64_t pad[5];  // Padding to match Canneal's element size
 } Element;
 
 typedef struct {
@@ -94,15 +95,10 @@ void init_chip(Chip *chip, int max_x, int max_y, int num_elements, int num_netli
         }
     }
     
-    #pragma omp parallel for schedule(static)
     for (int i = 0; i < num_elements; i++) {
         int net_id = chip->elements[i].netlist_id;
-        int pos;
-        #pragma omp atomic capture
-        pos = chip->netlists[net_id].count++;
-        
-        if (pos < MAX_DEGREE) {
-            chip->netlists[net_id].elements[pos] = i;
+        if (chip->netlists[net_id].count < MAX_DEGREE) {
+            chip->netlists[net_id].elements[chip->netlists[net_id].count++] = i;
         }
     }
 }
@@ -159,10 +155,11 @@ int64_t anneal(Chip *chip, int iterations) {
 }
 
 int main(int argc, char **argv) {
+    // Mitosis Multi Socket config scaled to 100GB
     int max_x = 120000;
     int max_y = 11000;
-    int num_elements = 1400000000;
-    int num_netlists = 84000000;
+    int num_elements = 1350000000;
+    int num_netlists = 96428571;
     int iterations = SWAP_ATTEMPTS_PER_TEMP;
     
     printf("Canneal Benchmark - Multi-socket (100GB target)\n");
