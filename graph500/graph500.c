@@ -8,7 +8,7 @@
 
 #define SCALE 27
 #define EDGEFACTOR 23
-#define NUM_BFS_ROOTS 64
+#define NUM_BFS_ROOTS 4
 
 // R-MAT parameters (Graph500 spec)
 #define A 0.57
