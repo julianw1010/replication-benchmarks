@@ -1,17 +1,16 @@
 CC = gcc
 CFLAGS = -O3 -march=native -fopenmp -Wall
 TARGET = hashjoin
-SRC = hashjoin.c
-
-.PHONY: all clean run
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $(SRC) -o $(TARGET)
+$(TARGET): hashjoin.c
+	$(CC) $(CFLAGS) -o $(TARGET) hashjoin.c
+
+clean:
+	rm -f $(TARGET)
 
 run: $(TARGET)
 	./$(TARGET)
 
-clean:
-	rm -f $(TARGET)
+.PHONY: all clean run

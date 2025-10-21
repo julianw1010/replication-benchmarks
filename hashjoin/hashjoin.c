@@ -4,15 +4,17 @@
 #include <omp.h>
 
 #define TARGET_GB 100ULL
-#define BYTES_PER_ELEMENT 228ULL
-#define NUM_ELEMENTS ((TARGET_GB * 1024ULL * 1024ULL * 1024ULL) / BYTES_PER_ELEMENT)
-#define HASH_MASK (NUM_ELEMENTS - 1)
+#define BYTES_PER_ENTRY 228ULL
+#define TABLE_SIZE ((TARGET_GB * 1024ULL * 1024ULL * 1024ULL) / BYTES_PER_ENTRY)
+#define LOAD_FACTOR 0.75
+#define NUM_ELEMENTS ((uint64_t)(TABLE_SIZE * LOAD_FACTOR))
+#define MAX_PROBE 64
 
 typedef struct __attribute__((packed)) {
     uint64_t key;
     uint64_t value;
     uint64_t hash;
-    uint64_t metadata;
+    uint64_t chain_len;
     char payload[196];
 } Entry;
 
@@ -32,56 +34,57 @@ void build_phase(void) {
     
     #pragma omp parallel for schedule(static)
     for (uint64_t i = 0; i < NUM_ELEMENTS; i++) {
-        uint64_t key = hash_fn(i);
-        uint64_t idx = key & HASH_MASK;
+        uint64_t key = hash_fn(i) | 1;
+        uint64_t idx = hash_fn(key) % TABLE_SIZE;
         hash_table[idx].key = key;
         hash_table[idx].value = i;
         hash_table[idx].hash = hash_fn(key);
-        hash_table[idx].metadata = i ^ key;
     }
     
-    printf("Build: %.2f sec\n", omp_get_wtime() - start);
+    double elapsed = omp_get_wtime() - start;
+    printf("Build: %.2f sec | %.2f M ops/sec\n",
+           elapsed, NUM_ELEMENTS / elapsed / 1e6);
 }
 
 uint64_t probe_phase(void) {
-    uint64_t total_probes = NUM_ELEMENTS * 40;
-    uint64_t total_hits = 0;
+    uint64_t total_probes = NUM_ELEMENTS * 3;
+    uint64_t hits = 0;
     double start = omp_get_wtime();
     
-    #pragma omp parallel reduction(+:total_hits)
+    #pragma omp parallel reduction(+:hits)
     {
-        int tid = omp_get_thread_num();
-        uint64_t idx = hash_fn(tid * 0x9e3779b97f4a7c15ULL) & HASH_MASK;
+        uint64_t seed = hash_fn(omp_get_thread_num() * 0x123456789abcdefULL);
         
         #pragma omp for schedule(static)
         for (uint64_t i = 0; i < total_probes; i++) {
-            for (int hop = 0; hop < 8; hop++) {
-                uint64_t val = hash_table[idx].value;
-                uint64_t key = hash_table[idx].key;
-                idx = hash_fn(val ^ key ^ hop) & HASH_MASK;
-                
-                if (key != 0) {
-                    total_hits++;
+            seed = hash_fn(seed + i);
+            uint64_t key = hash_fn(seed % NUM_ELEMENTS) | 1;
+            uint64_t idx = hash_fn(key) % TABLE_SIZE;
+            
+            for (int probe = 0; probe < MAX_PROBE; probe++) {
+                uint64_t pos = (idx + probe) % TABLE_SIZE;
+                if (hash_table[pos].key == key) {
+                    hits += hash_table[pos].value;
+                    break;
                 }
             }
         }
     }
     
     double elapsed = omp_get_wtime() - start;
-    printf("Probe: %.2f sec | %.2f M probes/sec | Hits: %lu\n", 
-           elapsed, (total_probes * 8.0) / elapsed / 1e6, total_hits);
+    printf("Probe: %.2f sec | %.2f M probes/sec | Hits: %lu\n",
+           elapsed, total_probes / elapsed / 1e6, hits);
     
-    return total_hits;
+    return hits;
 }
 
 int main(int argc, char **argv) {
     if (argc > 1) omp_set_num_threads(atoi(argv[1]));
     
-    size_t total_bytes = NUM_ELEMENTS * sizeof(Entry);
-    printf("HashJoin Multi-Socket Benchmark\n");
-    printf("Threads: %d | Elements: %lu | Size: %.2fGB\n", 
-           omp_get_max_threads(), NUM_ELEMENTS, 
-           total_bytes / (1024.0*1024.0*1024.0));
+    size_t total_bytes = TABLE_SIZE * sizeof(Entry);
+    printf("HashJoin Multi-Socket Benchmark (Mitosis-style)\n");
+    printf("Threads: %d | Elements: %lu | Size: %.2f GB\n",
+           omp_get_max_threads(), NUM_ELEMENTS, total_bytes / (1024.0*1024.0*1024.0));
     
     hash_table = (Entry *)malloc(total_bytes);
     if (!hash_table) {
@@ -89,8 +92,9 @@ int main(int argc, char **argv) {
         return 1;
     }
     
-    #pragma omp parallel for
-    for (uint64_t i = 0; i < NUM_ELEMENTS; i++) {
+    // Quick parallel touch to allocate pages
+    #pragma omp parallel for schedule(static)
+    for (uint64_t i = 0; i < TABLE_SIZE; i += 512) {
         hash_table[i].key = 0;
     }
     
