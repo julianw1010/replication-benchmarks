@@ -1,22 +1,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <string.h>
-#include <time.h>
 #include <omp.h>
 
-#define TABLE_SIZE (100ULL * 1024 * 1024 * 1024 / sizeof(Entry))  // ~100GB
-#define PROBE_COUNT (4000000000ULL)  // 4B probes per thread
-#define HASH_MASK (TABLE_SIZE - 1)
+#define TARGET_GB 100ULL
+#define BYTES_PER_ELEMENT 228ULL
+#define NUM_ELEMENTS ((TARGET_GB * 1024ULL * 1024ULL * 1024ULL) / BYTES_PER_ELEMENT)
+#define HASH_MASK (NUM_ELEMENTS - 1)
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint64_t key;
     uint64_t value;
+    uint64_t hash;
+    uint64_t metadata;
+    char payload[196];
 } Entry;
 
 static Entry *hash_table;
 
-static inline uint64_t hash(uint64_t x) {
+static inline uint64_t hash_fn(uint64_t x) {
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
     x ^= x >> 33;
@@ -25,96 +27,76 @@ static inline uint64_t hash(uint64_t x) {
     return x;
 }
 
-void build_phase(uint64_t num_entries) {
-    printf("Building hash table with %lu entries (%.2f GB)...\n", 
-           num_entries, (num_entries * sizeof(Entry)) / (1024.0 * 1024.0 * 1024.0));
-    
+void build_phase(void) {
     double start = omp_get_wtime();
     
     #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < num_entries; i++) {
-        uint64_t key = hash(i);
+    for (uint64_t i = 0; i < NUM_ELEMENTS; i++) {
+        uint64_t key = hash_fn(i);
         uint64_t idx = key & HASH_MASK;
         hash_table[idx].key = key;
         hash_table[idx].value = i;
+        hash_table[idx].hash = hash_fn(key);
+        hash_table[idx].metadata = i ^ key;
     }
     
-    double elapsed = omp_get_wtime() - start;
-    printf("Build completed in %.2f seconds\n", elapsed);
+    printf("Build: %.2f sec\n", omp_get_wtime() - start);
 }
 
-uint64_t probe_phase(uint64_t num_probes) {
-    printf("Probing with %lu lookups per thread...\n", num_probes);
-    
+uint64_t probe_phase(void) {
+    uint64_t total_probes = NUM_ELEMENTS * 40;
     uint64_t total_hits = 0;
     double start = omp_get_wtime();
     
-    #pragma omp parallel
+    #pragma omp parallel reduction(+:total_hits)
     {
         int tid = omp_get_thread_num();
-        uint64_t local_hits = 0;
-        uint64_t seed = hash(tid + 12345);
+        uint64_t idx = hash_fn(tid * 0x9e3779b97f4a7c15ULL) & HASH_MASK;
         
-        #pragma omp for schedule(static) reduction(+:total_hits)
-        for (uint64_t i = 0; i < num_probes; i++) {
-            seed = hash(seed + i);
-            uint64_t idx = seed & HASH_MASK;
-            
-            // Random walk to stress page tables
-            for (int j = 0; j < 4; j++) {
-                uint64_t next_idx = hash(hash_table[idx].value) & HASH_MASK;
-                if (hash_table[next_idx].key != 0) {
-                    local_hits++;
+        #pragma omp for schedule(static)
+        for (uint64_t i = 0; i < total_probes; i++) {
+            for (int hop = 0; hop < 8; hop++) {
+                uint64_t val = hash_table[idx].value;
+                uint64_t key = hash_table[idx].key;
+                idx = hash_fn(val ^ key ^ hop) & HASH_MASK;
+                
+                if (key != 0) {
+                    total_hits++;
                 }
-                idx = next_idx;
             }
         }
-        total_hits += local_hits;
     }
     
     double elapsed = omp_get_wtime() - start;
-    double throughput = (num_probes * 4.0) / elapsed / 1e6;
-    
-    printf("Probe completed in %.2f seconds\n", elapsed);
-    printf("Throughput: %.2f M probes/sec\n", throughput);
-    printf("Total hits: %lu\n", total_hits);
+    printf("Probe: %.2f sec | %.2f M probes/sec | Hits: %lu\n", 
+           elapsed, (total_probes * 8.0) / elapsed / 1e6, total_hits);
     
     return total_hits;
 }
 
 int main(int argc, char **argv) {
-    int num_threads = omp_get_max_threads();
+    if (argc > 1) omp_set_num_threads(atoi(argv[1]));
     
-    if (argc > 1) {
-        num_threads = atoi(argv[1]);
-        omp_set_num_threads(num_threads);
-    }
+    size_t total_bytes = NUM_ELEMENTS * sizeof(Entry);
+    printf("HashJoin Multi-Socket Benchmark\n");
+    printf("Threads: %d | Elements: %lu | Size: %.2fGB\n", 
+           omp_get_max_threads(), NUM_ELEMENTS, 
+           total_bytes / (1024.0*1024.0*1024.0));
     
-    printf("HashJoin Benchmark - Page Table Walk Stress Test\n");
-    printf("Threads: %d\n", num_threads);
-    printf("Table size: %lu entries (%.2f GB)\n", 
-           TABLE_SIZE, (TABLE_SIZE * sizeof(Entry)) / (1024.0 * 1024.0 * 1024.0));
-    
-    // Allocate hash table
-    hash_table = (Entry *)malloc(TABLE_SIZE * sizeof(Entry));
+    hash_table = (Entry *)malloc(total_bytes);
     if (!hash_table) {
-        fprintf(stderr, "Failed to allocate memory\n");
+        fprintf(stderr, "Allocation failed\n");
         return 1;
     }
     
-    // Initialize to zero
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < TABLE_SIZE; i++) {
+    #pragma omp parallel for
+    for (uint64_t i = 0; i < NUM_ELEMENTS; i++) {
         hash_table[i].key = 0;
-        hash_table[i].value = 0;
     }
     
-    // Run benchmark phases
-    build_phase(TABLE_SIZE / 2);
-    probe_phase(PROBE_COUNT);
+    build_phase();
+    probe_phase();
     
     free(hash_table);
-    printf("\nBenchmark complete\n");
-    
     return 0;
 }
