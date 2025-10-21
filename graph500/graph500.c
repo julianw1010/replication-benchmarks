@@ -2,13 +2,19 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <time.h>
+#include <math.h>
 #include <omp.h>
 #include <sys/time.h>
 
-#define SCALE 27  // ~100GB for edge list
+#define SCALE 27
 #define EDGEFACTOR 16
-#define NUM_BFS_ROOTS 4
+#define NUM_BFS_ROOTS 64
+
+// R-MAT parameters (Graph500 spec)
+#define A 0.57
+#define B 0.19
+#define C 0.19
+#define D 0.05
 
 typedef struct {
     int64_t *edges;
@@ -23,24 +29,27 @@ static inline double get_time() {
     return tv.tv_sec + tv.tv_usec * 1e-6;
 }
 
-static inline uint64_t xorshift64(uint64_t *state) {
-    uint64_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    return x;
+static inline uint64_t splitmix64(uint64_t *state) {
+    uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
 }
 
-void generate_edges(int64_t **edges_out, int64_t *num_edges_out) {
+static inline double rand_double(uint64_t *state) {
+    return (splitmix64(state) >> 11) * 0x1.0p-53;
+}
+
+void generate_rmat_edges(int64_t **edges_out, int64_t *num_edges_out) {
     int64_t num_vertices = 1L << SCALE;
     int64_t num_edges = num_vertices * EDGEFACTOR;
     
-    printf("Allocating %.2f GB for edge list...\n", (num_edges * 2 * sizeof(int64_t)) / (1024.0 * 1024.0 * 1024.0));
+    double mem_gb = (num_edges * 2 * sizeof(int64_t)) / (1024.0 * 1024.0 * 1024.0);
+    printf("Generating R-MAT graph: %.2f GB edge list\n", mem_gb);
     
-    int64_t *edges = (int64_t *)malloc(num_edges * 2 * sizeof(int64_t));
+    int64_t *edges = malloc(num_edges * 2 * sizeof(int64_t));
     if (!edges) {
-        fprintf(stderr, "Failed to allocate edge list\n");
+        fprintf(stderr, "Edge allocation failed\n");
         exit(1);
     }
     
@@ -48,18 +57,40 @@ void generate_edges(int64_t **edges_out, int64_t *num_edges_out) {
     
     #pragma omp parallel
     {
-        uint64_t seed = 0x123456789ABCDEF0ULL + omp_get_thread_num();
+        uint64_t seed = 0x2b992ddfa23249d6ULL ^ (omp_get_thread_num() * 0x9e3779b97f4a7c15ULL);
         
         #pragma omp for schedule(static)
-        for (int64_t i = 0; i < num_edges; i++) {
-            int64_t u = xorshift64(&seed) % num_vertices;
-            int64_t v = xorshift64(&seed) % num_vertices;
-            edges[i * 2] = u;
-            edges[i * 2 + 1] = v;
+        for (int64_t e = 0; e < num_edges; e++) {
+            int64_t u = 0, v = 0;
+            
+            for (int depth = 0; depth < SCALE; depth++) {
+                double r = rand_double(&seed);
+                int64_t u_bit, v_bit;
+                
+                if (r < A) {
+                    u_bit = 0; v_bit = 0;
+                } else if (r < A + B) {
+                    u_bit = 0; v_bit = 1;
+                } else if (r < A + B + C) {
+                    u_bit = 1; v_bit = 0;
+                } else {
+                    u_bit = 1; v_bit = 1;
+                }
+                
+                u = (u << 1) | u_bit;
+                v = (v << 1) | v_bit;
+            }
+            
+            // Permute to break symmetry
+            u = (u * 0x9e3779b97f4a7c15ULL) % num_vertices;
+            v = (v * 0x94d049bb133111ebULL) % num_vertices;
+            
+            edges[e * 2] = u;
+            edges[e * 2 + 1] = v;
         }
     }
     
-    printf("Edge generation: %.2f s\n", get_time() - start);
+    printf("R-MAT generation: %.2f s\n", get_time() - start);
     
     *edges_out = edges;
     *num_edges_out = num_edges;
@@ -68,162 +99,152 @@ void generate_edges(int64_t **edges_out, int64_t *num_edges_out) {
 void build_csr(int64_t *edges, int64_t num_edges, graph_t *graph) {
     int64_t num_vertices = 1L << SCALE;
     
-    printf("Building CSR (%.2f GB)...\n", 
-           (num_vertices * sizeof(int64_t) + num_edges * 2 * sizeof(int64_t)) / (1024.0 * 1024.0 * 1024.0));
+    double mem_gb = (num_vertices * sizeof(int64_t) + num_edges * 2 * sizeof(int64_t)) / (1024.0 * 1024.0 * 1024.0);
+    printf("Building CSR: %.2f GB\n", mem_gb);
     
     graph->num_vertices = num_vertices;
     graph->num_edges = num_edges * 2;
-    graph->offsets = (int64_t *)calloc(num_vertices + 1, sizeof(int64_t));
-    graph->edges = (int64_t *)malloc(num_edges * 2 * sizeof(int64_t));
+    graph->offsets = calloc(num_vertices + 1, sizeof(int64_t));
+    graph->edges = malloc(num_edges * 2 * sizeof(int64_t));
     
     if (!graph->offsets || !graph->edges) {
-        fprintf(stderr, "Failed to allocate CSR\n");
+        fprintf(stderr, "CSR allocation failed\n");
         exit(1);
     }
     
     double start = get_time();
     
-    // Count degrees
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < num_edges; i++) {
         int64_t u = edges[i * 2];
         int64_t v = edges[i * 2 + 1];
-        #pragma omp atomic
-        graph->offsets[u + 1]++;
-        #pragma omp atomic
-        graph->offsets[v + 1]++;
+        __sync_fetch_and_add(&graph->offsets[u + 1], 1);
+        __sync_fetch_and_add(&graph->offsets[v + 1], 1);
     }
     
-    // Prefix sum
     for (int64_t i = 1; i <= num_vertices; i++) {
         graph->offsets[i] += graph->offsets[i - 1];
     }
     
-    // Fill edges in parallel with shared temp offsets
-    int64_t *temp_offsets = (int64_t *)malloc((num_vertices + 1) * sizeof(int64_t));
-    memcpy(temp_offsets, graph->offsets, (num_vertices + 1) * sizeof(int64_t));
+    int64_t *temp = malloc((num_vertices + 1) * sizeof(int64_t));
+    memcpy(temp, graph->offsets, (num_vertices + 1) * sizeof(int64_t));
     
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < num_edges; i++) {
         int64_t u = edges[i * 2];
         int64_t v = edges[i * 2 + 1];
         
-        int64_t pos_u = __sync_fetch_and_add(&temp_offsets[u], 1);
-        int64_t pos_v = __sync_fetch_and_add(&temp_offsets[v], 1);
+        int64_t pos_u = __sync_fetch_and_add(&temp[u], 1);
+        int64_t pos_v = __sync_fetch_and_add(&temp[v], 1);
         
         graph->edges[pos_u] = v;
         graph->edges[pos_v] = u;
     }
     
-    free(temp_offsets);
-    
+    free(temp);
     printf("CSR build: %.2f s\n", get_time() - start);
 }
 
 int64_t parallel_bfs(graph_t *graph, int64_t root) {
-    int64_t num_vertices = graph->num_vertices;
-    int64_t *visited = (int64_t *)malloc(num_vertices * sizeof(int64_t));
+    int64_t n = graph->num_vertices;
+    int64_t *parent = malloc(n * sizeof(int64_t));
     
     #pragma omp parallel for
-    for (int64_t i = 0; i < num_vertices; i++) {
-        visited[i] = -1;
+    for (int64_t i = 0; i < n; i++) {
+        parent[i] = -1;
     }
     
-    visited[root] = 0;
-    int64_t *queue = (int64_t *)malloc(num_vertices * sizeof(int64_t));
-    int64_t *next_queue = (int64_t *)malloc(num_vertices * sizeof(int64_t));
+    parent[root] = root;
+    int64_t *frontier = malloc(n * sizeof(int64_t));
+    int64_t *next = malloc(n * sizeof(int64_t));
     
-    queue[0] = root;
-    int64_t queue_size = 1;
-    int64_t level = 0;
-    int64_t edges_traversed = 0;
+    frontier[0] = root;
+    int64_t fsize = 1;
+    int64_t edges_visited = 0;
     
-    while (queue_size > 0) {
-        int64_t next_size = 0;
+    while (fsize > 0) {
+        int64_t nsize = 0;
         
-        #pragma omp parallel
+        #pragma omp parallel reduction(+:edges_visited)
         {
-            int64_t local_next[1024];
-            int64_t local_count = 0;
+            int64_t local_buf[1024];
+            int64_t local_cnt = 0;
             
-            #pragma omp for schedule(dynamic, 1024) reduction(+:edges_traversed)
-            for (int64_t i = 0; i < queue_size; i++) {
-                int64_t u = queue[i];
+            #pragma omp for schedule(dynamic, 64)
+            for (int64_t i = 0; i < fsize; i++) {
+                int64_t u = frontier[i];
                 int64_t start = graph->offsets[u];
                 int64_t end = graph->offsets[u + 1];
                 
                 for (int64_t j = start; j < end; j++) {
                     int64_t v = graph->edges[j];
-                    edges_traversed++;
+                    edges_visited++;
                     
-                    if (__sync_bool_compare_and_swap(&visited[v], -1, level + 1)) {
-                        if (local_count < 1024) {
-                            local_next[local_count++] = v;
+                    if (__sync_bool_compare_and_swap(&parent[v], -1, u)) {
+                        if (local_cnt < 1024) {
+                            local_buf[local_cnt++] = v;
                         } else {
-                            int64_t pos = __sync_fetch_and_add(&next_size, local_count);
-                            memcpy(&next_queue[pos], local_next, local_count * sizeof(int64_t));
-                            local_next[0] = v;
-                            local_count = 1;
+                            int64_t pos = __sync_fetch_and_add(&nsize, local_cnt);
+                            memcpy(&next[pos], local_buf, local_cnt * sizeof(int64_t));
+                            local_buf[0] = v;
+                            local_cnt = 1;
                         }
                     }
                 }
             }
             
-            if (local_count > 0) {
-                int64_t pos = __sync_fetch_and_add(&next_size, local_count);
-                memcpy(&next_queue[pos], local_next, local_count * sizeof(int64_t));
+            if (local_cnt > 0) {
+                int64_t pos = __sync_fetch_and_add(&nsize, local_cnt);
+                memcpy(&next[pos], local_buf, local_cnt * sizeof(int64_t));
             }
         }
         
-        int64_t *temp = queue;
-        queue = next_queue;
-        next_queue = temp;
-        queue_size = next_size;
-        level++;
+        int64_t *tmp = frontier;
+        frontier = next;
+        next = tmp;
+        fsize = nsize;
     }
     
-    free(visited);
-    free(queue);
-    free(next_queue);
+    free(parent);
+    free(frontier);
+    free(next);
     
-    return edges_traversed;
+    return edges_visited;
 }
 
 int main() {
-    printf("Graph500 Benchmark - SCALE=%d, EDGEFACTOR=%d\n", SCALE, EDGEFACTOR);
-    printf("Target memory: ~100GB, Threads: %d\n\n", omp_get_max_threads());
+    printf("=== Graph500 Benchmark ===\n");
+    printf("SCALE=%d, EDGEFACTOR=%d, Threads=%d\n\n", SCALE, EDGEFACTOR, omp_get_max_threads());
     
-    int64_t *edges;
-    int64_t num_edges;
-    
-    generate_edges(&edges, &num_edges);
+    int64_t *edges, num_edges;
+    generate_rmat_edges(&edges, &num_edges);
     
     graph_t graph;
     build_csr(edges, num_edges, &graph);
     free(edges);
     
-    printf("\nRunning BFS traversals...\n");
+    printf("\nBFS Traversals:\n");
     
-    uint64_t seed = 0xDEADBEEF;
-    double total_time = 0;
-    double total_teps = 0;
+    uint64_t seed = 0x2b992ddfa23249d6ULL;
+    double total_time = 0, total_teps = 0;
     
     for (int i = 0; i < NUM_BFS_ROOTS; i++) {
-        int64_t root = xorshift64(&seed) % graph.num_vertices;
+        int64_t root = splitmix64(&seed) % graph.num_vertices;
         
         double start = get_time();
-        int64_t edges_traversed = parallel_bfs(&graph, root);
+        int64_t edges_visited = parallel_bfs(&graph, root);
         double elapsed = get_time() - start;
+        double teps = edges_visited / elapsed / 1e9;
         
-        double teps = edges_traversed / elapsed / 1e9;
         total_time += elapsed;
         total_teps += teps;
         
-        printf("BFS %2d: root=%10ld, edges=%10ld, time=%.3f s, GTEPS=%.3f\n", 
-               i, root, edges_traversed, elapsed, teps);
+        printf("BFS %2d: %.3f s, %.3f GTEPS\n", i, elapsed, teps);
     }
     
-    printf("\nAverage: %.3f s, %.3f GTEPS\n", total_time / NUM_BFS_ROOTS, total_teps / NUM_BFS_ROOTS);
+    printf("\n=== Results ===\n");
+    printf("Mean: %.3f s, %.3f GTEPS\n", total_time / NUM_BFS_ROOTS, total_teps / NUM_BFS_ROOTS);
+    printf("Harmonic mean TEPS: %.3f GTEPS\n", NUM_BFS_ROOTS / (total_time / (total_teps * NUM_BFS_ROOTS)));
     
     free(graph.offsets);
     free(graph.edges);

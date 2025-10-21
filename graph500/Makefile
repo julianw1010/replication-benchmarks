@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -O3 -march=native -fopenmp -Wall -Wextra
-LDFLAGS = -fopenmp -lm
+CFLAGS = -O3 -march=native -fopenmp -Wall
+LDFLAGS = -lm
 
 TARGET = graph500
 SRC = graph500.c
@@ -11,7 +11,7 @@ $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 run: $(TARGET)
-	OMP_NUM_THREADS=$$(nproc) ./$(TARGET)
+	./$(TARGET)
 
 clean:
 	rm -f $(TARGET)
