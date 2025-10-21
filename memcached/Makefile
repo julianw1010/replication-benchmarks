@@ -1,14 +1,13 @@
 CC = gcc
-CFLAGS = -O3 -fopenmp -Wall
-LDFLAGS = -lm
+CFLAGS = -O3 -march=native -fopenmp -Wall
+LDFLAGS = -fopenmp -lm
 
 TARGET = memcached_bench
-SRC = memcached_bench.c
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+$(TARGET): memcached_bench.c
+	$(CC) $(CFLAGS) -o $(TARGET) memcached_bench.c $(LDFLAGS)
 
 clean:
 	rm -f $(TARGET)
