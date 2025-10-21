@@ -3,12 +3,15 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include <omp.h>
 
+// Mitosis Memcached spec: keysize=8, element=24, 100% reads
+// Scaled to 100GB from original 576M elements / 363GB
 #define KEY_SIZE 8
 #define VAL_SIZE 24
-#define NUM_BUCKETS (1ULL << 28)
-#define TARGET_ENTRIES (2450000000ULL)
+#define NUM_BUCKETS (1ULL << 28)  // 268M buckets = 2GB
+#define NUM_ENTRIES (2500000000ULL)  // 2.5B entries * 40B = 100GB
 
 typedef struct entry {
     uint64_t key;
@@ -38,7 +41,7 @@ static inline uint64_t xorshift64(uint64_t *state) {
 }
 
 static inline uint64_t zipfian_next(uint64_t *state, uint64_t n, double alpha) {
-    double u = (double)xorshift64(state) / UINT64_MAX;
+    double u = (double)xorshift64(state) / (double)UINT64_MAX;
     return (uint64_t)(n * pow(u, -1.0 / (alpha - 1.0))) % n;
 }
 
@@ -58,22 +61,25 @@ int main(int argc, char **argv) {
     uint64_t iterations = (argc > 2) ? strtoull(argv[2], NULL, 10) : 1000000000ULL;
     
     size_t table_size = NUM_BUCKETS * sizeof(bucket_t);
-    size_t entries_size = TARGET_ENTRIES * sizeof(entry_t);
-    printf("Allocating %.2f GB hash table...\n", (table_size + entries_size) / (1024.0 * 1024.0 * 1024.0));
+    size_t entries_size = NUM_ENTRIES * sizeof(entry_t);
+    printf("Target memory: %.2f GB (%.2f GB buckets + %.2f GB entries)\n", 
+           (table_size + entries_size) / (1024.0 * 1024.0 * 1024.0),
+           table_size / (1024.0 * 1024.0 * 1024.0),
+           entries_size / (1024.0 * 1024.0 * 1024.0));
     
     bucket_t *table = (bucket_t*)calloc(NUM_BUCKETS, sizeof(bucket_t));
-    entry_t *entries = (entry_t*)malloc(TARGET_ENTRIES * sizeof(entry_t));
+    entry_t *entries = (entry_t*)malloc(NUM_ENTRIES * sizeof(entry_t));
     
     if (!table || !entries) {
         fprintf(stderr, "Allocation failed\n");
         return 1;
     }
     
-    printf("Populating hash table...\n");
+    printf("Populating %llu entries...\n", NUM_ENTRIES);
     #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < TARGET_ENTRIES; i++) {
+    for (uint64_t i = 0; i < NUM_ENTRIES; i++) {
         entries[i].key = i;
-        memset(entries[i].value, (char)i, VAL_SIZE);
+        memset(entries[i].value, (char)(i & 0xFF), VAL_SIZE);
         
         uint64_t bucket_idx = hash_func(i) % NUM_BUCKETS;
         
@@ -84,7 +90,8 @@ int main(int argc, char **argv) {
         } while (!__sync_bool_compare_and_swap(&table[bucket_idx].head, old_head, &entries[i]));
     }
     
-    printf("Running %d threads, %llu iterations (Zipfian α=1.2)...\n", num_threads, iterations);
+    printf("Running %d threads, %llu iterations (100%% reads, Zipfian α=1.2)...\n", 
+           num_threads, iterations);
     omp_set_num_threads(num_threads);
     
     double start = omp_get_wtime();
@@ -92,12 +99,12 @@ int main(int argc, char **argv) {
     
     #pragma omp parallel reduction(+:total_hits)
     {
-        uint64_t rng_state = omp_get_thread_num() * 0x123456789ABCDEFULL + time(NULL);
+        uint64_t rng_state = (uint64_t)omp_get_thread_num() * 0x123456789ABCDEFULL + (uint64_t)time(NULL);
         uint64_t local_hits = 0;
         uint64_t iters = iterations / num_threads;
         
         for (uint64_t i = 0; i < iters; i++) {
-            uint64_t key = zipfian_next(&rng_state, TARGET_ENTRIES, 1.2);
+            uint64_t key = zipfian_next(&rng_state, NUM_ENTRIES, 1.2);
             entry_t *result = hash_get(table, key);
             if (result) local_hits++;
         }

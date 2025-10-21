@@ -1,18 +1,18 @@
 CC = gcc
-CFLAGS = -O3 -march=native -fopenmp -Wall
-LDFLAGS = -fopenmp -lm
+CFLAGS = -O3 -march=native -fopenmp -Wall -Wextra
+LDFLAGS = -lm -fopenmp
 
-TARGET = memcached_bench
+TARGET = memcached
+
+.PHONY: all clean run
 
 all: $(TARGET)
 
-$(TARGET): memcached_bench.c
-	$(CC) $(CFLAGS) -o $(TARGET) memcached_bench.c $(LDFLAGS)
+$(TARGET): memcached.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:
 	rm -f $(TARGET)
 
 run: $(TARGET)
 	./$(TARGET)
-
-.PHONY: all clean run
