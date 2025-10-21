@@ -70,7 +70,11 @@ void init_chip(Chip *chip, int max_x, int max_y, int num_elements, int num_netli
     chip->locations = malloc(num_elements * sizeof(int));
     chip->netlists = malloc(num_netlists * sizeof(Netlist));
     
-    // Parallel element init
+    if (!chip->elements || !chip->locations || !chip->netlists) {
+        fprintf(stderr, "Memory allocation failed\n");
+        exit(1);
+    }
+    
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < num_elements; i++) {
         chip->elements[i].x = i % max_x;
@@ -79,38 +83,17 @@ void init_chip(Chip *chip, int max_x, int max_y, int num_elements, int num_netli
         chip->locations[i] = i;
     }
     
-    // Parallel netlist init
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < num_netlists; i++) {
         chip->netlists[i].capacity = MAX_DEGREE;
         chip->netlists[i].count = 0;
         chip->netlists[i].elements = malloc(MAX_DEGREE * sizeof(int));
+        if (!chip->netlists[i].elements) {
+            fprintf(stderr, "Netlist allocation failed\n");
+            exit(1);
+        }
     }
     
-    // Count elements per netlist in parallel
-    int *counts = calloc(num_netlists, sizeof(int));
-    #pragma omp parallel
-    {
-        int *local_counts = calloc(num_netlists, sizeof(int));
-        
-        #pragma omp for schedule(static)
-        for (int i = 0; i < num_elements; i++) {
-            int net_id = chip->elements[i].netlist_id;
-            if (local_counts[net_id] < MAX_DEGREE) {
-                local_counts[net_id]++;
-            }
-        }
-        
-        #pragma omp critical
-        {
-            for (int i = 0; i < num_netlists; i++) {
-                counts[i] += local_counts[i];
-            }
-        }
-        free(local_counts);
-    }
-    
-    // Assign elements in parallel with atomic counters
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < num_elements; i++) {
         int net_id = chip->elements[i].netlist_id;
@@ -122,8 +105,6 @@ void init_chip(Chip *chip, int max_x, int max_y, int num_elements, int num_netli
             chip->netlists[net_id].elements[pos] = i;
         }
     }
-    
-    free(counts);
 }
 
 int64_t anneal(Chip *chip, int iterations) {
@@ -134,9 +115,9 @@ int64_t anneal(Chip *chip, int iterations) {
     
     #pragma omp parallel reduction(+:total_cost)
     {
-        uint64_t seed = (uint64_t)time(NULL) ^ ((uint64_t)omp_get_thread_num() << 32);
+        uint64_t seed = (uint64_t)time(NULL) ^ ((uint64_t)omp_get_thread_num() << 32) ^ ((uint64_t)getpid() << 16);
         int tid = omp_get_thread_num();
-        int local_cost = 0;
+        int64_t local_cost = 0;
         
         #pragma omp for schedule(dynamic, 1024)
         for (int iter = 0; iter < iterations; iter++) {
@@ -180,15 +161,18 @@ int64_t anneal(Chip *chip, int iterations) {
 int main(int argc, char **argv) {
     int max_x = 120000;
     int max_y = 11000;
-    int num_elements = 1000000000;
-    int num_netlists = 60000000;
+    int num_elements = 1400000000;
+    int num_netlists = 84000000;
     int iterations = SWAP_ATTEMPTS_PER_TEMP;
     
-    printf("Canneal Benchmark - Multi-socket Configuration\n");
+    printf("Canneal Benchmark - Multi-socket (100GB target)\n");
     printf("Grid: %dx%d\n", max_x, max_y);
     printf("Elements: %d\n", num_elements);
     printf("Netlists: %d\n", num_netlists);
-    printf("Estimated memory: ~%.2f GB\n", (num_elements * sizeof(Element) + num_netlists * MAX_DEGREE * sizeof(int)) / 1e9);
+    printf("Estimated memory: ~%.2f GB\n", 
+           (num_elements * sizeof(Element) + 
+            num_elements * sizeof(int) +
+            num_netlists * (sizeof(Netlist) + MAX_DEGREE * sizeof(int))) / 1e9);
     
     Chip chip;
     printf("Initializing chip...\n");

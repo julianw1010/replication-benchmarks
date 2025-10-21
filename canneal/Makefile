@@ -1,20 +1,19 @@
-# Makefile
 CC = gcc
-CFLAGS = -O3 -march=native -fopenmp -Wall
+CFLAGS = -O3 -march=native -fopenmp -Wall -Wextra
 LDFLAGS = -fopenmp -lm
 
-TARGET = canneal
-SRC = canneal.c
+TARGET = canneal_bench
+SRC = canneal_bench.c
+
+.PHONY: all clean run
 
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDFLAGS)
-
-clean:
-	rm -f $(TARGET)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 run: $(TARGET)
 	./$(TARGET)
 
-.PHONY: all clean run
+clean:
+	rm -f $(TARGET)

@@ -6,17 +6,17 @@
 #include <math.h>
 #include <omp.h>
 
-// Mitosis Memcached spec: keysize=8, element=24, 100% reads
-// Scaled to 100GB from original 576M elements / 363GB
 #define KEY_SIZE 8
 #define VAL_SIZE 24
-#define NUM_BUCKETS (1ULL << 28)  // 268M buckets = 2GB
-#define NUM_ENTRIES (2500000000ULL)  // 2.5B entries * 40B = 100GB
+#define NUM_ENTRIES (160000000ULL)
+#define NUM_BUCKETS (1ULL << 26)
+#define PADDING_SIZE 584
 
 typedef struct entry {
     uint64_t key;
     char value[VAL_SIZE];
     struct entry *next;
+    char padding[PADDING_SIZE];
 } entry_t;
 
 typedef struct {
@@ -58,14 +58,16 @@ entry_t* hash_get(bucket_t *table, uint64_t key) {
 
 int main(int argc, char **argv) {
     int num_threads = (argc > 1) ? atoi(argv[1]) : omp_get_max_threads();
-    uint64_t iterations = (argc > 2) ? strtoull(argv[2], NULL, 10) : 1000000000ULL;
+    uint64_t iterations = (argc > 2) ? strtoull(argv[2], NULL, 10) : 2000000000ULL;
     
     size_t table_size = NUM_BUCKETS * sizeof(bucket_t);
     size_t entries_size = NUM_ENTRIES * sizeof(entry_t);
-    printf("Target memory: %.2f GB (%.2f GB buckets + %.2f GB entries)\n", 
+    printf("Memcached scaled from Mitosis spec (576M entries/363GB → 160M entries/100GB)\n");
+    printf("Memory: %.2f GB (%.2f GB buckets + %.2f GB entries)\n", 
            (table_size + entries_size) / (1024.0 * 1024.0 * 1024.0),
            table_size / (1024.0 * 1024.0 * 1024.0),
            entries_size / (1024.0 * 1024.0 * 1024.0));
+    printf("Entry size: %zu bytes (key=8, val=24, overhead=%d)\n", sizeof(entry_t), PADDING_SIZE);
     
     bucket_t *table = (bucket_t*)calloc(NUM_BUCKETS, sizeof(bucket_t));
     entry_t *entries = (entry_t*)malloc(NUM_ENTRIES * sizeof(entry_t));
@@ -75,11 +77,12 @@ int main(int argc, char **argv) {
         return 1;
     }
     
-    printf("Populating %llu entries...\n", NUM_ENTRIES);
+    printf("Populating %lu entries...\n", (unsigned long)NUM_ENTRIES);
     #pragma omp parallel for schedule(static)
     for (uint64_t i = 0; i < NUM_ENTRIES; i++) {
         entries[i].key = i;
         memset(entries[i].value, (char)(i & 0xFF), VAL_SIZE);
+        entries[i].next = NULL;
         
         uint64_t bucket_idx = hash_func(i) % NUM_BUCKETS;
         
@@ -90,8 +93,8 @@ int main(int argc, char **argv) {
         } while (!__sync_bool_compare_and_swap(&table[bucket_idx].head, old_head, &entries[i]));
     }
     
-    printf("Running %d threads, %llu iterations (100%% reads, Zipfian α=1.2)...\n", 
-           num_threads, iterations);
+    printf("Running %d threads, %lu iterations (100%% reads, Zipfian α=1.2)...\n", 
+           num_threads, (unsigned long)iterations);
     omp_set_num_threads(num_threads);
     
     double start = omp_get_wtime();
