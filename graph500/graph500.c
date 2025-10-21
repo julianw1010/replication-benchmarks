@@ -7,7 +7,7 @@
 #include <sys/time.h>
 
 #define SCALE 27
-#define EDGEFACTOR 16
+#define EDGEFACTOR 23
 #define NUM_BFS_ROOTS 64
 
 // R-MAT parameters (Graph500 spec)
