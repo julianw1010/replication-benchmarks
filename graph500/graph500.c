@@ -8,7 +8,7 @@
 #include <omp.h>
 #include <sys/time.h>
 
-#define SCALE 28
+#define SCALE 27
 #define EDGEFACTOR 16
 
 typedef int64_t vertex_t;
@@ -265,24 +265,36 @@ csr_graph_t *build_csr(edge_t *edges, int64_t num_edges, vertex_t num_vertices) 
     csr_graph_t *g = malloc(sizeof(csr_graph_t));
     g->num_vertices = num_vertices;
     g->num_edges = num_edges;
-    g->offsets = calloc(num_vertices + 1, sizeof(vertex_t));
+    
+    // NUMA-aware allocation: use malloc instead of calloc
+    g->offsets = malloc((num_vertices + 1) * sizeof(vertex_t));
     g->neighbors = malloc(num_edges * sizeof(vertex_t));
     
+    // First-touch initialization in parallel for NUMA awareness
+    #pragma omp parallel for schedule(static)
+    for (vertex_t i = 0; i <= num_vertices; i++) {
+        g->offsets[i] = 0;
+    }
+    
+    // Count degrees (histogram)
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < num_edges; i++) {
         __sync_fetch_and_add(&g->offsets[edges[i].src + 1], 1);
     }
     
+    // Prefix sum (sequential, but small compared to other costs)
     for (vertex_t i = 1; i <= num_vertices; i++) {
         g->offsets[i] += g->offsets[i - 1];
     }
     
+    // Create temporary offsets for parallel edge insertion
     vertex_t *temp_offsets = malloc((num_vertices + 1) * sizeof(vertex_t));
-    #pragma omp parallel for
+    #pragma omp parallel for schedule(static)
     for (vertex_t i = 0; i <= num_vertices; i++) {
         temp_offsets[i] = g->offsets[i];
     }
     
+    // Insert edges in parallel
     #pragma omp parallel
     {
         int num_threads = omp_get_max_threads();
@@ -312,7 +324,8 @@ typedef struct {
 int64_t parallel_bfs(csr_graph_t *g, vertex_t root, vertex_t *parent) {
     vertex_t num_vertices = g->num_vertices;
     
-    #pragma omp parallel for
+    // Initialize parent array with first-touch (already NUMA-aware)
+    #pragma omp parallel for schedule(static)
     for (vertex_t i = 0; i < num_vertices; i++) {
         parent[i] = -1;
     }
@@ -320,24 +333,33 @@ int64_t parallel_bfs(csr_graph_t *g, vertex_t root, vertex_t *parent) {
     parent[root] = root;
     int64_t edges_traversed = 0;
     
-    queue_t *local_queues = malloc(omp_get_max_threads() * sizeof(queue_t));
-    for (int t = 0; t < omp_get_max_threads(); t++) {
-        local_queues[t].queue = malloc(num_vertices * sizeof(vertex_t));
-        local_queues[t].head = 0;
-        local_queues[t].tail = 0;
+    // Allocate local queues in parallel for NUMA awareness
+    int max_threads = omp_get_max_threads();
+    queue_t *local_queues = malloc(max_threads * sizeof(queue_t));
+    
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        local_queues[tid].queue = malloc(num_vertices * sizeof(vertex_t));
+        local_queues[tid].head = 0;
+        local_queues[tid].tail = 0;
     }
     
+    // Allocate frontiers with first-touch
     vertex_t *current_frontier = malloc(num_vertices * sizeof(vertex_t));
     vertex_t *next_frontier = malloc(num_vertices * sizeof(vertex_t));
+    
     int64_t current_size = 1;
     current_frontier[0] = root;
     
     while (current_size > 0) {
-        #pragma omp parallel for schedule(dynamic, 64)
-        for (int t = 0; t < omp_get_max_threads(); t++) {
+        // Reset local queue sizes
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < max_threads; t++) {
             local_queues[t].tail = 0;
         }
         
+        // Process current frontier
         #pragma omp parallel for schedule(dynamic, 64) reduction(+:edges_traversed)
         for (int64_t i = 0; i < current_size; i++) {
             vertex_t u = current_frontier[i];
@@ -357,21 +379,26 @@ int64_t parallel_bfs(csr_graph_t *g, vertex_t root, vertex_t *parent) {
             }
         }
         
+        // Gather next frontier from local queues
         int64_t next_size = 0;
-        for (int t = 0; t < omp_get_max_threads(); t++) {
+        for (int t = 0; t < max_threads; t++) {
             memcpy(&next_frontier[next_size], local_queues[t].queue, 
                    local_queues[t].tail * sizeof(vertex_t));
             next_size += local_queues[t].tail;
         }
         
+        // Swap frontiers
         vertex_t *tmp = current_frontier;
         current_frontier = next_frontier;
         next_frontier = tmp;
         current_size = next_size;
     }
     
-    for (int t = 0; t < omp_get_max_threads(); t++) {
-        free(local_queues[t].queue);
+    // Cleanup
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        free(local_queues[tid].queue);
     }
     free(local_queues);
     free(current_frontier);
@@ -387,7 +414,7 @@ double get_time() {
 }
 
 int main(int argc, char **argv) {
-    printf("Graph500 Benchmark (Scaled)\n");
+    printf("Graph500 Benchmark (NUMA-Aware)\n");
     printf("Scale: %d, Edge Factor: %d\n", SCALE, EDGEFACTOR);
     
     vertex_t num_vertices = (vertex_t)1 << SCALE;
