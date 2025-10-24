@@ -27,7 +27,7 @@
 #include <sched.h>
 
 // Benchmark parameters (from scaling calculation)
-#define NUM_ELEMENTS     1034482758L  // 1034.5M elements
+#define NUM_ELEMENTS     2534482758L  // 1034.5M elements
 #define BTREE_ORDER      4
 #define NUM_THREADS      64
 #define OPERATIONS_PER_THREAD  10000000L  // 10M operations per thread
