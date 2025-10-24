@@ -63,11 +63,17 @@ hash_table_t* init_hash_table() {
     ht->num_entries = NUM_ELEMENTS;
     ht->num_buckets = HASH_TABLE_SIZE;
     
-    // Allocate buckets
-    ht->buckets = calloc(HASH_TABLE_SIZE, sizeof(hash_entry_t*));
+    // NUMA-aware allocation: use malloc instead of calloc
+    ht->buckets = malloc(HASH_TABLE_SIZE * sizeof(hash_entry_t*));
     if (!ht->buckets) {
         fprintf(stderr, "Failed to allocate hash table buckets\n");
         exit(1);
+    }
+    
+    // First-touch initialization of buckets in parallel for NUMA distribution
+    #pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < HASH_TABLE_SIZE; i++) {
+        ht->buckets[i] = NULL;
     }
     
     // Allocate all entries
@@ -78,9 +84,10 @@ hash_table_t* init_hash_table() {
     }
     
     // Initialize entries and insert into hash table
+    // Use static scheduling for proper first-touch NUMA distribution
     printf("Populating hash table...\n");
     
-    #pragma omp parallel for schedule(dynamic, 1024)
+    #pragma omp parallel for schedule(static)
     for (size_t i = 0; i < NUM_ELEMENTS; i++) {
         hash_entry_t *entry = &ht->entries[i];
         entry->key = i;
@@ -157,7 +164,7 @@ void run_benchmark(hash_table_t *ht, int thread_id, uint64_t *ops_count, double 
 }
 
 int main(int argc, char *argv[]) {
-    printf("=== Memcached Benchmark (Mitosis Paper - Scaled to 100GB) ===\n");
+    printf("=== Memcached Benchmark (NUMA-Aware - Scaled to 100GB) ===\n");
     printf("Parameters:\n");
     printf("  Elements: %lu (%.1fM)\n", NUM_ELEMENTS, NUM_ELEMENTS / 1048576.0);
     printf("  Key size: %d bytes\n", KEY_SIZE);
@@ -182,8 +189,19 @@ int main(int argc, char *argv[]) {
     
     // Run benchmark
     printf("Starting benchmark...\n");
-    uint64_t *ops_counts = malloc(num_threads * sizeof(uint64_t));
-    double *elapsed_times = malloc(num_threads * sizeof(double));
+    
+    // Allocate thread-local arrays inside parallel region for NUMA awareness
+    uint64_t *ops_counts = NULL;
+    double *elapsed_times = NULL;
+    
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            ops_counts = malloc(num_threads * sizeof(uint64_t));
+            elapsed_times = malloc(num_threads * sizeof(double));
+        }
+    }
     
     struct timeval bench_start, bench_end;
     gettimeofday(&bench_start, NULL);
