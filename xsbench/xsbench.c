@@ -34,7 +34,7 @@
 #define N_ISOTOPES 355
 #define N_GRIDPOINTS 6870628
 #define N_PARTICLES 265000000
-#define N_THREADS 112
+#define N_THREADS 64
 #define N_ENERGY_GROUPS 11303
 
 /*******************************************************************************
