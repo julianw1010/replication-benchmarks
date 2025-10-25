@@ -1,16 +1,32 @@
+# Makefile for NUMA-optimized Memcached benchmark
+
 CC = gcc
-CFLAGS = -O3 -march=native -fopenmp -Wall
-LDFLAGS = -fopenmp
+CFLAGS = -O3 -march=native -fopenmp -Wall -Wextra
+LDFLAGS = -fopenmp -lnuma -lpthread -lm
 
 TARGET = memcached
-SRC = memcached.c
+SOURCE = memcached.c
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDFLAGS)
+$(TARGET): $(SOURCE)
+	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCE) $(LDFLAGS)
 
 clean:
 	rm -f $(TARGET)
 
-.PHONY: all clean
+run: $(TARGET)
+	numactl --cpunodebind=0,1,2,3 --membind=0,1,2,3 ./$(TARGET)
+
+run-short: $(TARGET)
+	numactl --cpunodebind=0,1,2,3 --membind=0,1,2,3 ./$(TARGET) 5
+
+# Run with page table replication (for testing improvement)
+run-pgtablerepl: $(TARGET)
+	numactl --cpunodebind=0,1,2,3 --membind=0,1,2,3 --pgtablerepl=all ./$(TARGET)
+
+# Check NUMA statistics
+numa-stats:
+	numastat -m
+
+.PHONY: all clean run run-short run-pgtablerepl numa-stats
